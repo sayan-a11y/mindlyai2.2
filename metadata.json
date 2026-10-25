@@ -1,0 +1,6 @@
+{
+  "name": "MINDLY",
+  "description": "Fast, private, all-in-one AI assistant running on self-hosted open models. Ask anything. Create anything. On every device.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

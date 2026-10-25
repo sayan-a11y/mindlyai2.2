@@ -168,6 +168,9 @@ export default function MindlyApp() {
       localStorage.removeItem('mindly_user');
       sessionStorage.removeItem('mindly_admin_session');
     }
+    setChats([]);
+    setFolders([]);
+    setActiveChatId(null);
     setCurrentUser(null);
     showToast('Signed out successfully.');
   };
@@ -250,144 +253,150 @@ export default function MindlyApp() {
   // Real-Time LocalStorage Persistence (Instant Auto-Save)
   const isHydratedRef = useRef(false);
 
+  // Helper functions for user-scoped storage keys
+  const getChatStorageKey = useCallback((uid?: string) => (uid ? `mindly_chats_${uid}` : 'mindly_chats_guest'), []);
+  const getFolderStorageKey = useCallback((uid?: string) => (uid ? `mindly_folders_${uid}` : 'mindly_folders_guest'), []);
+
+  // Hydrate settings, memories, and drafts once on mount
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const timer = setTimeout(() => {
-      try {
-        const savedChats = localStorage.getItem('mindly_chats_v2');
-        if (savedChats) {
-          const parsed = JSON.parse(savedChats);
-          if (Array.isArray(parsed) && parsed.length > 0) setChats(parsed);
-        }
-        const savedFolders = localStorage.getItem('mindly_folders_v2');
-        if (savedFolders) {
-          const parsed = JSON.parse(savedFolders);
-          if (Array.isArray(parsed) && parsed.length > 0) setFolders(parsed);
-        }
-        const savedSettings = localStorage.getItem('mindly_settings_v2');
-        if (savedSettings) {
-          const parsed = JSON.parse(savedSettings);
-          if (parsed && typeof parsed === 'object') setSettings(prev => ({ ...prev, ...parsed }));
-        }
-        const savedMemories = localStorage.getItem('mindly_memories_v2');
-        if (savedMemories) {
-          const parsed = JSON.parse(savedMemories);
-          if (Array.isArray(parsed)) setMemories(parsed);
-        }
-        const savedDraft = localStorage.getItem('mindly_draft_prompt');
-        if (savedDraft) setInput(savedDraft);
-      } catch (err) {
-        console.warn('Could not read from localStorage', err);
-      } finally {
-        isHydratedRef.current = true;
+    try {
+      const savedSettings = localStorage.getItem('mindly_settings_v2');
+      if (savedSettings) {
+        const parsed = JSON.parse(savedSettings);
+        if (parsed && typeof parsed === 'object') setSettings(prev => ({ ...prev, ...parsed }));
       }
-    }, 0);
-
-    return () => clearTimeout(timer);
+      const savedMemories = localStorage.getItem('mindly_memories_v2');
+      if (savedMemories) {
+        const parsed = JSON.parse(savedMemories);
+        if (Array.isArray(parsed)) setMemories(parsed);
+      }
+      const savedDraft = localStorage.getItem('mindly_draft_prompt');
+      if (savedDraft) setInput(savedDraft);
+    } catch (err) {
+      console.warn('Could not read global storage', err);
+    }
   }, []);
 
-  // Supabase Backend & Realtime Synchronization
+  // User-scoped Chat & Folder Synchronization (Local + Supabase)
   useEffect(() => {
-    let isMounted = true;
+    if (typeof window === 'undefined') return;
+    const uid = currentUser?.id;
+    const chatKey = getChatStorageKey(uid);
+    const folderKey = getFolderStorageKey(uid);
 
-    async function syncSupabase() {
-      try {
-        const [remoteChats, remoteFolders] = await Promise.all([
-          loadChatsFromSupabase(),
-          loadFoldersFromSupabase(),
-        ]);
+    let localChats: Chat[] = [];
+    let localFolders: ChatFolder[] = [];
 
-        if (!isMounted) return;
-
-        if (remoteChats !== null && remoteChats.length > 0) {
-          setChats(prev => {
-            if (prev.length === 0) return remoteChats;
-            const prevMap = new Map(prev.map(c => [c.id, c]));
-            return remoteChats.map(rc => {
-              const local = prevMap.get(rc.id);
-              if (!local) return rc;
-              return local.messages.length > rc.messages.length ? local : rc;
-            });
-          });
-        }
-
-        if (remoteFolders !== null) {
-          setFolders(remoteFolders);
-        }
-      } catch (err) {
-        console.warn('[Supabase Sync] Initial sync warning:', err);
+    try {
+      const savedChats = localStorage.getItem(chatKey);
+      if (savedChats) {
+        const parsed = JSON.parse(savedChats);
+        if (Array.isArray(parsed)) localChats = parsed;
       }
+      const savedFolders = localStorage.getItem(folderKey);
+      if (savedFolders) {
+        const parsed = JSON.parse(savedFolders);
+        if (Array.isArray(parsed)) localFolders = parsed;
+      }
+    } catch (e) {
+      console.warn('LocalStorage parse error:', e);
     }
 
-    syncSupabase();
+    setChats(localChats);
+    setFolders(localFolders);
+    setActiveChatId(prev => (localChats.some(c => c.id === prev) ? prev : localChats[0]?.id || null));
+    isHydratedRef.current = true;
 
-    // Subscribe to live Realtime updates across windows & devices
-    const unsubscribe = subscribeToSupabaseRealtime({
-      onMessageInsert: newMsg => {
-        setChats(prev =>
-          prev.map(c => {
-            if (c.id !== newMsg.chatId) return c;
-            if (c.messages.some(m => m.id === newMsg.id)) return c;
-            return {
-              ...c,
-              updatedAt: new Date().toISOString(),
-              messages: [...c.messages, newMsg],
-            };
-          })
-        );
-      },
-      onChatChange: () => {
-        // CRITICAL BUG FIX: Never overwrite local chat while a message is generating or streaming!
-        if (isGeneratingRef.current) {
-          return;
-        }
-        loadChatsFromSupabase().then(rc => {
-          if (!rc || rc.length === 0 || !isMounted) return;
-          setChats(prev => {
-            const prevMap = new Map(prev.map(c => [c.id, c]));
-            return rc.map(remoteChat => {
-              const localChat = prevMap.get(remoteChat.id);
-              if (!localChat) return remoteChat;
-              // If local chat has more or equal messages, keep local messages
-              if (localChat.messages.length >= remoteChat.messages.length) {
-                return {
-                  ...remoteChat,
-                  messages: localChat.messages,
-                  model: localChat.model || remoteChat.model,
-                };
-              }
-              return remoteChat;
-            });
+    // If signed-in user, sync with Supabase and listen to their isolated Realtime channel
+    if (uid) {
+      let isMounted = true;
+      loadChatsFromSupabase(uid).then(remoteChats => {
+        if (!isMounted || !remoteChats) return;
+        setChats(prev => {
+          if (prev.length === 0) return remoteChats;
+          const prevMap = new Map(prev.map(c => [c.id, c]));
+          return remoteChats.map(rc => {
+            const local = prevMap.get(rc.id);
+            if (!local) return rc;
+            return local.messages.length > rc.messages.length ? local : rc;
           });
         });
-      },
-    });
+      });
 
-    return () => {
-      isMounted = false;
-      unsubscribe();
-    };
-  }, []);
+      loadFoldersFromSupabase(uid).then(remoteFolders => {
+        if (!isMounted || !remoteFolders) return;
+        setFolders(remoteFolders);
+      });
 
-  // Continuous auto-save for chats
+      const unsubscribe = subscribeToSupabaseRealtime(
+        {
+          onMessageInsert: newMsg => {
+            setChats(prev =>
+              prev.map(c => {
+                if (c.id !== newMsg.chatId) return c;
+                if (c.messages.some(m => m.id === newMsg.id)) return c;
+                return {
+                  ...c,
+                  updatedAt: new Date().toISOString(),
+                  messages: [...c.messages, newMsg],
+                };
+              })
+            );
+          },
+          onChatChange: () => {
+            if (isGeneratingRef.current) return;
+            loadChatsFromSupabase(uid).then(rc => {
+              if (!rc || !isMounted) return;
+              setChats(prev => {
+                const prevMap = new Map(prev.map(c => [c.id, c]));
+                return rc.map(remoteChat => {
+                  const localChat = prevMap.get(remoteChat.id);
+                  if (!localChat) return remoteChat;
+                  if (localChat.messages.length >= remoteChat.messages.length) {
+                    return {
+                      ...remoteChat,
+                      messages: localChat.messages,
+                      model: localChat.model || remoteChat.model,
+                    };
+                  }
+                  return remoteChat;
+                });
+              });
+            });
+          },
+        },
+        uid
+      );
+
+      return () => {
+        isMounted = false;
+        unsubscribe();
+      };
+    }
+  }, [currentUser?.id, getChatStorageKey, getFolderStorageKey]);
+
+  // Continuous auto-save for chats (strictly isolated per user/guest)
   useEffect(() => {
     if (typeof window === 'undefined' || !isHydratedRef.current) return;
     try {
-      localStorage.setItem('mindly_chats_v2', JSON.stringify(chats));
+      const chatKey = getChatStorageKey(currentUser?.id);
+      localStorage.setItem(chatKey, JSON.stringify(chats));
     } catch (err) {
       console.warn('Could not save chats to localStorage', err);
     }
-  }, [chats]);
+  }, [chats, currentUser?.id, getChatStorageKey]);
 
-  // Continuous auto-save for folders
+  // Continuous auto-save for folders (strictly isolated per user/guest)
   useEffect(() => {
     if (typeof window === 'undefined' || !isHydratedRef.current) return;
     try {
-      localStorage.setItem('mindly_folders_v2', JSON.stringify(folders));
+      const folderKey = getFolderStorageKey(currentUser?.id);
+      localStorage.setItem(folderKey, JSON.stringify(folders));
     } catch (err) {
       console.warn('Could not save folders to localStorage', err);
     }
-  }, [folders]);
+  }, [folders, currentUser?.id, getFolderStorageKey]);
 
   // Continuous auto-save for user settings
   useEffect(() => {
@@ -532,7 +541,7 @@ export default function MindlyApp() {
 
   const handleDeleteChat = (id: string) => {
     setChats(prev => prev.filter(c => c.id !== id));
-    deleteChatFromSupabase(id);
+    deleteChatFromSupabase(id, currentUser?.id);
     if (activeChatId === id) {
       setActiveChatId(null);
     }
@@ -543,7 +552,7 @@ export default function MindlyApp() {
       prev.map(c => {
         if (c.id === id) {
           const updated = { ...c, title: newTitle, updatedAt: new Date().toISOString() };
-          saveChatToSupabase(updated);
+          saveChatToSupabase(updated, currentUser?.id);
           return updated;
         }
         return c;
@@ -556,7 +565,7 @@ export default function MindlyApp() {
       prev.map(c => {
         if (c.id === id) {
           const updated = { ...c, pinned: !c.pinned };
-          saveChatToSupabase(updated);
+          saveChatToSupabase(updated, currentUser?.id);
           return updated;
         }
         return c;
@@ -574,16 +583,16 @@ export default function MindlyApp() {
       updatedAt: new Date().toISOString(),
     };
     setFolders(prev => [newFolder, ...prev]);
-    saveFolderToSupabase(newFolder);
+    saveFolderToSupabase(newFolder, currentUser?.id);
     showToast(`Folder "${name}" created`);
-  }, [showToast]);
+  }, [currentUser?.id, showToast]);
 
   const handleRenameFolder = (id: string, newName: string) => {
     setFolders(prev =>
       prev.map(f => {
         if (f.id === id) {
           const updated = { ...f, name: newName, updatedAt: new Date().toISOString() };
-          saveFolderToSupabase(updated);
+          saveFolderToSupabase(updated, currentUser?.id);
           return updated;
         }
         return f;
@@ -594,13 +603,13 @@ export default function MindlyApp() {
 
   const handleDeleteFolder = (id: string) => {
     setFolders(prev => prev.filter(f => f.id !== id));
-    deleteFolderFromSupabase(id);
+    deleteFolderFromSupabase(id, currentUser?.id);
     // Safe deletion: move all chats inside this folder to uncategorized root list
     setChats(prev =>
       prev.map(c => {
         if (c.folderId === id) {
           const updated = { ...c, folderId: null };
-          saveChatToSupabase(updated);
+          saveChatToSupabase(updated, currentUser?.id);
           return updated;
         }
         return c;
@@ -614,7 +623,7 @@ export default function MindlyApp() {
       prev.map(f => {
         if (f.id === id) {
           const updated = { ...f, isCollapsed: !f.isCollapsed };
-          saveFolderToSupabase(updated);
+          saveFolderToSupabase(updated, currentUser?.id);
           return updated;
         }
         return f;
@@ -627,7 +636,7 @@ export default function MindlyApp() {
       prev.map(c => {
         if (c.id === chatId) {
           const updated = { ...c, folderId, updatedAt: new Date().toISOString() };
-          saveChatToSupabase(updated);
+          saveChatToSupabase(updated, currentUser?.id);
           return updated;
         }
         return c;
@@ -638,9 +647,13 @@ export default function MindlyApp() {
   };
 
   const handleConfirmClearAll = () => {
-    chats.forEach(c => deleteChatFromSupabase(c.id));
+    chats.forEach(c => deleteChatFromSupabase(c.id, currentUser?.id));
     setChats([]);
     setActiveChatId(null);
+    if (typeof window !== 'undefined') {
+      const chatKey = getChatStorageKey(currentUser?.id);
+      localStorage.removeItem(chatKey);
+    }
     showToast('All chat history deleted');
   };
 
@@ -686,7 +699,7 @@ export default function MindlyApp() {
       };
       setChats(prev => [newChat, ...prev]);
       setActiveChatId(targetChatId);
-      saveChatToSupabase(newChat);
+      saveChatToSupabase(newChat, currentUser?.id);
     } else {
       const existing = chats.find(c => c.id === targetChatId);
       if (existing) currentMessages = [...existing.messages];
@@ -701,7 +714,7 @@ export default function MindlyApp() {
       createdAt: new Date().toISOString(),
     };
 
-    saveMessageToSupabase(userMessage);
+    saveMessageToSupabase(userMessage, currentUser?.id);
 
     const updatedWithUser = [...currentMessages, userMessage];
 
@@ -860,9 +873,9 @@ export default function MindlyApp() {
             };
 
             if (finishedAssistant) {
-              saveMessageToSupabase(finishedAssistant);
+              saveMessageToSupabase(finishedAssistant, currentUser?.id);
             }
-            saveChatToSupabase(updatedChat);
+            saveChatToSupabase(updatedChat, currentUser?.id);
 
             return updatedChat;
           })
@@ -881,7 +894,7 @@ export default function MindlyApp() {
           sources: data?.sources || [],
           createdAt: new Date().toISOString(),
         };
-        saveMessageToSupabase(finishedAssistant);
+        saveMessageToSupabase(finishedAssistant, currentUser?.id);
 
         setChats(prev =>
           prev.map(c => {
@@ -893,7 +906,7 @@ export default function MindlyApp() {
                 m.id === assistantMsgId ? finishedAssistant : m
               ),
             };
-            saveChatToSupabase(updatedChat);
+            saveChatToSupabase(updatedChat, currentUser?.id);
             return updatedChat;
           })
         );
@@ -954,6 +967,7 @@ export default function MindlyApp() {
       };
       setChats(prev => [newChat, ...prev]);
       setActiveChatId(targetChatId);
+      saveChatToSupabase(newChat, currentUser?.id);
     }
 
     const userMsg: Message = {
@@ -963,6 +977,7 @@ export default function MindlyApp() {
       content: `Create an image (${style}, ${aspectRatio}): "${prompt}"`,
       createdAt: new Date().toISOString(),
     };
+    saveMessageToSupabase(userMsg, currentUser?.id);
 
     setChats(prev =>
       prev.map(c =>
@@ -1007,13 +1022,15 @@ export default function MindlyApp() {
         },
         createdAt: new Date().toISOString(),
       };
+      saveMessageToSupabase(assistantMsg, currentUser?.id);
 
       setChats(prev =>
-        prev.map(c =>
-          c.id === targetChatId
-            ? { ...c, messages: [...c.messages, assistantMsg], updatedAt: new Date().toISOString() }
-            : c
-        )
+        prev.map(c => {
+          if (c.id !== targetChatId) return c;
+          const updated = { ...c, messages: [...c.messages, assistantMsg], updatedAt: new Date().toISOString() };
+          saveChatToSupabase(updated, currentUser?.id);
+          return updated;
+        })
       );
 
       setUsage(prev => ({
@@ -1025,21 +1042,27 @@ export default function MindlyApp() {
     } finally {
       setIsGenerating(false);
     }
-  }, [activeChatId, settings.personalApiKey]);
+  }, [activeChatId, currentUser?.id, settings.personalApiKey]);
 
   const handleFeedback = (messageId: string, type: 'up' | 'down') => {
     if (!activeChatId) return;
+    let nextFeedback: 'up' | 'down' | null = null;
     setChats(prev =>
       prev.map(c => {
         if (c.id !== activeChatId) return c;
         return {
           ...c,
-          messages: c.messages.map(m =>
-            m.id === messageId ? { ...m, feedback: m.feedback === type ? null : type } : m
-          ),
+          messages: c.messages.map(m => {
+            if (m.id === messageId) {
+              nextFeedback = m.feedback === type ? null : type;
+              return { ...m, feedback: nextFeedback };
+            }
+            return m;
+          }),
         };
       })
     );
+    updateMessageFeedbackInSupabase(messageId, nextFeedback, currentUser?.id);
   };
 
   const handleEditMessage = (messageId: string, newContent: string) => {

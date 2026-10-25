@@ -37,42 +37,42 @@ const MODEL_REGISTRY: Record<string, ModelSpec> = {
     name: 'MINDLY 2.2 Fast',
     key: process.env.OPENROUTER_API_KEY_FAST || '',
     primaryModel: process.env.OPENROUTER_MODEL_FAST || 'nvidia/nemotron-3.5-lightning:free',
-    fallbackModel: process.env.OPENROUTER_MODEL_FAST_FALLBACK || 'liquid/lfm-2.5-2.6b:free',
+    fallbackModel: process.env.OPENROUTER_MODEL_FAST_FALLBACK || 'dots-studio/dots-3-note-preview:free',
     systemPrompt: `${MASTER_SYSTEM_PROMPT}\nYou are operating as MINDLY 2.2 Fast. Deliver lightning-fast, concise, and direct responses.`,
   },
   'mindly-fast': {
     name: 'MINDLY 2.2 Fast',
     key: process.env.OPENROUTER_API_KEY_FAST || '',
     primaryModel: process.env.OPENROUTER_MODEL_FAST || 'nvidia/nemotron-3.5-lightning:free',
-    fallbackModel: process.env.OPENROUTER_MODEL_FAST_FALLBACK || 'liquid/lfm-2.5-2.6b:free',
+    fallbackModel: process.env.OPENROUTER_MODEL_FAST_FALLBACK || 'dots-studio/dots-3-note-preview:free',
     systemPrompt: `${MASTER_SYSTEM_PROMPT}\nYou are operating as MINDLY 2.2 Fast. Deliver lightning-fast, concise, and direct responses.`,
   },
   'mindly-2.2-pro': {
     name: 'MINDLY 2.2 Pro',
     key: process.env.OPENROUTER_API_KEY_PRO || '',
-    primaryModel: process.env.OPENROUTER_MODEL_PRO || 'thinkingmachines/inkling-small:free',
+    primaryModel: process.env.OPENROUTER_MODEL_PRO || 'dots-studio/dots-3-note-preview:free',
     fallbackModel: process.env.OPENROUTER_MODEL_PRO_FALLBACK || 'recursive/flint-v1.0:free',
     systemPrompt: `${MASTER_SYSTEM_PROMPT}\nYou are operating as MINDLY 2.2 Pro. Deliver deep, well-structured, production-ready answers.`,
   },
   'mindly-pro': {
     name: 'MINDLY 2.2 Pro',
     key: process.env.OPENROUTER_API_KEY_PRO || '',
-    primaryModel: process.env.OPENROUTER_MODEL_PRO || 'thinkingmachines/inkling-small:free',
+    primaryModel: process.env.OPENROUTER_MODEL_PRO || 'dots-studio/dots-3-note-preview:free',
     fallbackModel: process.env.OPENROUTER_MODEL_PRO_FALLBACK || 'recursive/flint-v1.0:free',
     systemPrompt: `${MASTER_SYSTEM_PROMPT}\nYou are operating as MINDLY 2.2 Pro. Deliver deep, well-structured, production-ready answers.`,
   },
   'mindly-2.2-think': {
     name: 'MINDLY 2.2 Think',
     key: process.env.OPENROUTER_API_KEY_THINK || '',
-    primaryModel: process.env.OPENROUTER_MODEL_THINK || 'nvidia/nemotron-3-super-120b-a12b:free',
-    fallbackModel: process.env.OPENROUTER_MODEL_THINK_FALLBACK || 'liquid/lfm-2.5-2.6b:free',
+    primaryModel: process.env.OPENROUTER_MODEL_THINK || 'recursive/flint-v1.0:free',
+    fallbackModel: process.env.OPENROUTER_MODEL_THINK_FALLBACK || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
     systemPrompt: `${MASTER_SYSTEM_PROMPT}\nYou are operating as MINDLY 2.2 Think. Provide deep multi-step reasoned solutions and mathematical proofs.`,
   },
   'mindly-think': {
     name: 'MINDLY 2.2 Think',
     key: process.env.OPENROUTER_API_KEY_THINK || '',
-    primaryModel: process.env.OPENROUTER_MODEL_THINK || 'nvidia/nemotron-3-super-120b-a12b:free',
-    fallbackModel: process.env.OPENROUTER_MODEL_THINK_FALLBACK || 'liquid/lfm-2.5-2.6b:free',
+    primaryModel: process.env.OPENROUTER_MODEL_THINK || 'recursive/flint-v1.0:free',
+    fallbackModel: process.env.OPENROUTER_MODEL_THINK_FALLBACK || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
     systemPrompt: `${MASTER_SYSTEM_PROMPT}\nYou are operating as MINDLY 2.2 Think. Provide deep multi-step reasoned solutions and mathematical proofs.`,
   },
   'mindly-2.2-coding': {
@@ -128,7 +128,7 @@ async function callOpenRouter(
   spec: ModelSpec,
   messages: any[],
   stream: boolean,
-  timeoutMs = 4000,
+  timeoutMs = 9000,
   apiKeyOverride?: string
 ): Promise<Response> {
   const activeModel = spec.primaryModel;
@@ -157,7 +157,6 @@ async function callOpenRouter(
             })),
           ],
           stream,
-          include_reasoning: false,
         }),
         signal: controller.signal,
       });
@@ -171,10 +170,10 @@ async function callOpenRouter(
 
   let res = await tryCall(activeModel, keyToUse, timeoutMs);
 
-  // If primary timed out, failed, or was rate-limited (429), try fallback model with fallback key
+  // If primary timed out, failed (403, 404, 429), try fallback model with fallback key
   if ((!res || !res.ok) && spec.fallbackModel) {
     const fallbackKeyToUse = spec.fallbackKey || keyToUse;
-    const fallbackRes = await tryCall(spec.fallbackModel, fallbackKeyToUse, 3000);
+    const fallbackRes = await tryCall(spec.fallbackModel, fallbackKeyToUse, 7000);
     if (fallbackRes && fallbackRes.ok) {
       return fallbackRes;
     }
@@ -301,7 +300,7 @@ export async function POST(req: NextRequest) {
           let inThinkTag = false;
 
           try {
-            const apiRes = await callOpenRouter(spec, messages || [], true, 4500, body.personalApiKey);
+            const apiRes = await callOpenRouter(spec, messages || [], true, 9000, body.personalApiKey);
 
             if (apiRes.ok && apiRes.body) {
               const reader = apiRes.body.getReader();
@@ -309,7 +308,7 @@ export async function POST(req: NextRequest) {
               let done = false;
               let partialLine = '';
 
-              // Give OpenRouter up to 4500ms for the first chunk to begin streaming
+              // Give OpenRouter up to 9000ms for the first chunk to begin streaming
               const readWithTimeout = (ms: number) =>
                 Promise.race([
                   reader.read(),
@@ -319,7 +318,7 @@ export async function POST(req: NextRequest) {
                 ]);
 
               while (!done) {
-                const { value, done: isDone } = await readWithTimeout(streamedAny ? 8000 : 4500);
+                const { value, done: isDone } = await readWithTimeout(streamedAny ? 10000 : 9000);
                 done = isDone;
 
                 if (value) {
@@ -464,7 +463,7 @@ export async function POST(req: NextRequest) {
       const apiRes = await callOpenRouter(spec, messages || [], false);
       if (apiRes.ok) {
         const data = await apiRes.json();
-        const rawContent = data.choices?.[0]?.message?.content || '';
+        const rawContent = data.choices?.[0]?.message?.content || data.choices?.[0]?.message?.reasoning || '';
         const content = sanitizeOutput(rawContent);
 
         if (content) {
